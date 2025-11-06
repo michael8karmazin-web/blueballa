@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
-import OpenAI from "openai";
 import { buildSchema } from "@/app/lib/schemas";
+
+export const dynamic = "force-dynamic"; // don't prerender this route
+export const runtime = "nodejs";        // ensure Node runtime (not edge), ok for OpenAI SDK
 
 const MOCK_TEXT = `Stage 0.5 — Baseline & Flow
 - NGK Iridium plugs ($48)
@@ -18,37 +20,39 @@ Stage 1+ — Feel
 - Short-shift plate/bushings — $60
 Est. gain: response only | Cost: ~$240
 
-Budget summary: parts ~$1,160 (DIY). Keep smog-legal in CA; no tune required.`;
+Budget summary: parts ~$1,160 (DIY). Keep smog-legal in CA; no tune required.`
 
 export async function POST(req: Request) {
+  const body = await req.json();
+  const parsed = buildSchema.parse(body);
+
+  const demo = process.env.DEMO_MODE === "1";
+  const apiKey = process.env.OPENAI_API_KEY;
+
+  // 👇 FREE path: always return mock when in demo or missing key
+  if (demo || !apiKey) {
+    return NextResponse.json({ result: MOCK_TEXT });
+  }
+
   try {
-    const body = await req.json();
-    const parsed = buildSchema.parse(body);
-
-    // DEMO: if no key or demo mode set, return a mock plan
-    if (!process.env.OPENAI_API_KEY || process.env.DEMO_MODE === "1") {
-      return NextResponse.json({ result: MOCK_TEXT });
-    }
-
-    const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
+    // Lazy-import OpenAI ONLY when we really need it
+    const { default: OpenAI } = await import("openai");
+    const openai = new OpenAI({ apiKey });
 
     const completion = await openai.chat.completions.create({
       model: "gpt-4o-mini",
       temperature: 0.2,
       messages: [
-        { role: "system", content: "You are Build Buddy, an expert in car performance planning. Be specific and conservative for daily drivers; prefer smog-legal options for CA." },
-        { role: "user", content: `Create a staged build plan for a ${parsed.carModel} with a budget of ${parsed.budget} and goal of ${parsed.goal}. List stages, parts, brands, est. costs, if tune required, and a short budget summary.` }
+        { role: "system", content: "You are Build Buddy, an expert in car performance planning." },
+        {
+          role: "user",
+          content: `Create a staged build plan for ${parsed.carModel} with a budget of ${parsed.budget} and goal ${parsed.goal}. Include brands, costs, tune yes/no, and a short budget summary.`,
+        },
       ],
     });
 
     return NextResponse.json({ result: completion.choices[0].message.content });
   } catch (err: any) {
-    // Friendly error for quota/rate limit
-    if (err?.status === 429 || /quota/i.test(err?.message || "")) {
-      return NextResponse.json({
-        error: "OpenAI quota exceeded (429). Add credits in your OpenAI billing or enable DEMO_MODE=1 on Vercel.",
-      }, { status: 429 });
-    }
-    return NextResponse.json({ error: err?.message || "Server error" }, { status: 500 });
+    return NextResponse.json({ error: "AI call failed", detail: err?.message }, { status: 500 });
   }
 }
